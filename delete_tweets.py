@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 # Constants
 MAX_DELETIONS = 17
 DELETED_FILE = "deleted_tweets.json"
-FETCHED_TWEETS_FILE = "fetched_tweets.json"
+TWEETS_FILE = "tweets.js"
 API_BASE_URL = "https://api.twitter.com/2"
 
 # ANSI Color Codes
@@ -79,41 +79,6 @@ class BaseTwitterAPI(ABC):
             self.log(f"❌ Erreur API: {str(e)}", Colors.RED)
             raise
 
-    def get_user_id(self) -> Optional[str]:
-        """Get the authenticated user's ID."""
-        self.log("🔍 Recherche de l'ID utilisateur...", Colors.CYAN)
-        try:
-            response = self._make_request("GET", "users/me")
-            user_id = response["data"]["id"]
-            self.log(f"✅ Authentification réussie pour l'utilisateur {user_id}", Colors.GREEN)
-            return user_id
-        except Exception as e:
-            self.log(f"❌ Échec de l'authentification: {str(e)}", Colors.RED)
-            return None
-
-    def fetch_user_tweets(
-        self,
-        user_id: str,
-        max_results: int = 100,
-        fields: List[str] = ["created_at"]
-    ) -> List[Dict[str, Any]]:
-        """Fetch tweets for a specific user."""
-        self.log("📥 Récupération des tweets...", Colors.CYAN)
-        try:
-            params = {
-                "max_results": max_results,
-                "tweet.fields": ",".join(fields)
-            }
-            response = self._make_request(
-                "GET",
-                f"users/{user_id}/tweets",
-                params=params
-            )
-            return response.get("data", [])
-        except Exception as e:
-            self.log(f"❌ Échec de la récupération des tweets: {str(e)}", Colors.RED)
-            return []
-
     def delete_tweet(self, tweet_id: str) -> bool:
         """Delete a specific tweet."""
         self.log(f"🗑️ Suppression du tweet {tweet_id}", Colors.YELLOW)
@@ -145,58 +110,34 @@ class TwitterDeleter(BaseTwitterAPI):
             json.dump(list(ids), f)
         self.log(f"💾 {len(ids)} IDs de tweets supprimés sauvegardés", Colors.BLUE)
 
-    def _load_fetched_tweets(self) -> List[Dict]:
-        """Load fetched tweets from file."""
-        if os.path.exists(FETCHED_TWEETS_FILE):
-            with open(FETCHED_TWEETS_FILE, 'r') as f:
-                tweets = json.load(f)
-                self.log(f"📖 {len(tweets)} tweets chargés depuis le cache", Colors.BLUE)
+    def _load_tweets_from_file(self) -> List[Dict]:
+        """Load tweets from the tweets.js file."""
+        if not os.path.exists(TWEETS_FILE):
+            self.log(f"❌ Fichier {TWEETS_FILE} non trouvé", Colors.RED)
+            return []
+
+        try:
+            with open(TWEETS_FILE, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Remove the JavaScript wrapper and parse as JSON
+                json_str = content.replace('window.YTD.tweets.part0 = ', '')
+                tweets = json.loads(json_str)
+                self.log(f"📖 {len(tweets)} tweets chargés depuis {TWEETS_FILE}", Colors.BLUE)
                 return tweets
-        return []
+        except Exception as e:
+            self.log(f"❌ Erreur lors de la lecture du fichier {TWEETS_FILE}: {str(e)}", Colors.RED)
+            return []
 
-    def _save_fetched_tweets(self, tweets: List[Dict]) -> None:
-        """Save fetched tweets to file."""
-        with open(FETCHED_TWEETS_FILE, 'w') as f:
-            json.dump(tweets, f)
-        self.log(f"💾 {len(tweets)} tweets mis en cache", Colors.BLUE)
-
-    def _remove_fetched_tweet(self, tweet_id: str) -> None:
-        """Remove a tweet from the fetched tweets cache."""
-        tweets = self._load_fetched_tweets()
-        original_count = len(tweets)
-        tweets = [t for t in tweets if t["id"] != tweet_id]
-        self._save_fetched_tweets(tweets)
-        self.log(f"🗑️ Tweet {tweet_id} retiré du cache ({original_count} → {len(tweets)})", Colors.YELLOW)
-
-    def fetch_latest_tweets(self, user_id: str) -> List[Dict]:
-        """Fetch the latest tweets for the user."""
-        tweets = self.fetch_user_tweets(user_id)
-        if tweets:
-            oldest = min(tweets, key=lambda t: t["created_at"])
-            newest = max(tweets, key=lambda t: t["created_at"])
-            self.log(f"📊 {len(tweets)} tweets récupérés ({oldest['created_at']} à {newest['created_at']})", Colors.GREEN)
-        else:
-            self.log("ℹ️ Aucun tweet trouvé", Colors.YELLOW)
-
-        self._save_fetched_tweets(tweets)
-        return sorted(tweets, key=lambda t: t["created_at"])
-
-    def delete_oldest_tweets(self) -> None:
-        """Main method to delete oldest tweets."""
+    def delete_tweets_from_file(self) -> None:
+        """Main method to delete tweets from the file."""
         self.log("🚀 Démarrage du processus de suppression...", Colors.MAGENTA)
 
         # Load previously deleted tweets
         deleted_ids = self._load_deleted_ids()
         self.log(f"📊 {len(deleted_ids)} tweets précédemment supprimés trouvés", Colors.BLUE)
 
-        # Get user ID
-        user_id = self.get_user_id()
-        if not user_id:
-            self.log("❌ Impossible de continuer sans ID utilisateur", Colors.RED)
-            return
-
-        # Fetch and process tweets
-        tweets = self.fetch_latest_tweets(user_id)
+        # Load tweets from file
+        tweets = self._load_tweets_from_file()
         if not tweets:
             self.log("ℹ️ Aucun tweet à traiter", Colors.YELLOW)
             return
@@ -204,12 +145,14 @@ class TwitterDeleter(BaseTwitterAPI):
         # Process tweets
         deleted = 0
         skipped = 0
-        for tweet in tweets:
+        for tweet_data in tweets:
             if deleted >= MAX_DELETIONS:
                 self.log(f"⏹️ Limite de suppression atteinte ({MAX_DELETIONS})", Colors.YELLOW)
                 break
 
-            tweet_id = tweet["id"]
+            tweet = tweet_data["tweet"]
+            tweet_id = tweet["id_str"]
+
             if tweet_id in deleted_ids:
                 self.log(f"⏭️ Tweet {tweet_id} déjà supprimé, passage au suivant", Colors.YELLOW)
                 skipped += 1
@@ -218,7 +161,6 @@ class TwitterDeleter(BaseTwitterAPI):
             if self.delete_tweet(tweet_id):
                 deleted_ids.add(tweet_id)
                 deleted += 1
-                self._remove_fetched_tweet(tweet_id)
                 self.log("⏳ Attente d'une seconde avant la prochaine suppression...", Colors.CYAN)
                 time.sleep(1)  # Rate limiting
 
@@ -230,7 +172,7 @@ class TwitterDeleter(BaseTwitterAPI):
 def main():
     try:
         deleter = TwitterDeleter()
-        deleter.delete_oldest_tweets()
+        deleter.delete_tweets_from_file()
     except Exception as e:
         TwitterDeleter.log(f"❌ Une erreur est survenue: {str(e)}", Colors.RED)
 
